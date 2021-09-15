@@ -21,7 +21,10 @@ ref_values = {
         '1.40': 582 * 1e6,
     },
     # ms
-    'mobile': {
+    'energy': {
+        '1.00': 1020,
+    },
+    'cycle': {
         '1.00': 700000,
     },
     'cpu': {},
@@ -37,7 +40,7 @@ parser.add_argument('--manual_seed', default=0, type=int)
 parser.add_argument('--yaml_path', type=str, default='/data/share/yaml/EyerisPE12x14.yaml')
 
 """ run config """
-parser.add_argument('--n_epochs', type=int, default=120)
+parser.add_argument('--n_epochs', type=int, default=80)
 parser.add_argument('--init_lr', type=float, default=0.025)
 parser.add_argument('--lr_schedule_type', type=str, default='cosine')
 # lr_schedule_param
@@ -85,13 +88,14 @@ parser.add_argument('--arch_adam_beta1', type=float, default=0)  # arch_opt_para
 parser.add_argument('--arch_adam_beta2', type=float, default=0.999)  # arch_opt_param
 parser.add_argument('--arch_adam_eps', type=float, default=1e-8)  # arch_opt_param
 parser.add_argument('--arch_weight_decay', type=float, default=0)
-parser.add_argument('--target_hardware', type=str, default=None, choices=['mobile', 'cpu', 'gpu8', 'flops', None])
+parser.add_argument('--target_hardware', type=str, default=None, choices=['mobile', 'cpu', 'gpu8', 'flops', 'balanced', None])
 """ Grad hyper-parameters """
 parser.add_argument('--grad_update_arch_param_every', type=int, default=5)
 parser.add_argument('--grad_update_steps', type=int, default=1)
 parser.add_argument('--grad_binary_mode', type=str, default='full_v2', choices=['full_v2', 'full', 'two'])
 parser.add_argument('--grad_data_batch', type=int, default=None)
 parser.add_argument('--grad_reg_loss_type', type=str, default='mul#log', choices=['add#linear', 'mul#log'])
+parser.add_argument('--grad_reg_loss_delta', type=float, default=1e-1)  # grad_reg_loss_params
 parser.add_argument('--grad_reg_loss_lambda', type=float, default=1e-1)  # grad_reg_loss_params
 parser.add_argument('--grad_reg_loss_alpha', type=float, default=0.2)  # grad_reg_loss_params
 parser.add_argument('--grad_reg_loss_beta', type=float, default=0.3)  # grad_reg_loss_params
@@ -157,12 +161,15 @@ if __name__ == '__main__':
         args.arch_opt_param = None
     if args.target_hardware is None:
         args.ref_value = None
+    elif args.target_hardware == "balanced":
+        args.ref_value_energy = ref_values['energy']['%.2f' % args.width_mult]
+        args.ref_value_cycle = ref_values['cycle']['%.2f' % args.width_mult]
     else:
         args.ref_value = ref_values[args.target_hardware]['%.2f' % args.width_mult]
     if args.arch_algo == 'grad':
         from nas_manager import GradientArchSearchConfig
         if args.grad_reg_loss_type == 'add#linear':
-            args.grad_reg_loss_params = {'lambda': args.grad_reg_loss_lambda}
+            args.grad_reg_loss_params = {'lambda': args.grad_reg_loss_lambda, 'delta': args.grad_reg_loss_delta}
         elif args.grad_reg_loss_type == 'mul#log':
             args.grad_reg_loss_params = {
                 'alpha': args.grad_reg_loss_alpha,
@@ -188,20 +195,22 @@ if __name__ == '__main__':
     arch_search_run_manager = ArchSearchRunManager(args.path, args.yaml_path, super_net, run_config, arch_search_config)
     # resume
     if args.resume:
-        try:
-            arch_search_run_manager.load_model()
-        except Exception:
-            from pathlib import Path
-            home = str(Path.home())
-            warmup_path = os.path.join(
-                home, 'Workspace/Exp/arch_search/%s_ProxylessNAS_%.2f_%s/warmup.pth.tar' %
-                      (run_config.dataset, args.width_mult, width_stages_str)
-            )
-            if os.path.exists(warmup_path):
-                print('load warmup weights')
-                arch_search_run_manager.load_model(model_fname=warmup_path)
-            else:
-                print('fail to load models')
+        # try:
+        #     arch_search_run_manager.load_model()
+        # except Exception:
+        from pathlib import Path
+        home = str(Path.home())
+        # warmup_path = os.path.join(
+        #     home, '/ProxylessNas_balanced/warmup.pth.tar'
+        # )
+        warmup_path = os.path.join(
+            '/home/mochagold/ProxylessNas_balanced/warmup.pth.tar'
+        )
+        if os.path.exists(warmup_path):
+            print('load warmup weights')
+            arch_search_run_manager.load_model(model_fname=warmup_path)
+        else:
+            print('fail to load models')
 
     # warmup
     if arch_search_run_manager.warmup:

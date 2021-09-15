@@ -255,19 +255,19 @@ class RunManager:
             net = self.net.module
 
         if l_type == 'mobile':
-            predicted_latency = 0
+            predicted_energy = 0
             try:
                 assert isinstance(net, ProxylessNASNets)
                 # first conv
-                predicted_latency += self.latency_estimator.predict(
+                predicted_energy += self.latency_estimator.predict(
                     'Conv', [32, 32, 3], [32, 32, net.first_conv.out_channels]
                 )
                 # feature mix layer
-                predicted_latency += self.latency_estimator.predict(
+                predicted_energy += self.latency_estimator.predict(
                     'Conv_1', [8, 8, net.feature_mix_layer.in_channels], [8, 8, net.feature_mix_layer.out_channels]
                 )
                 # classifier
-                predicted_latency += self.latency_estimator.predict(
+                predicted_energy += self.latency_estimator.predict(
                     'Logits', [8, 8, net.classifier.in_features], [net.classifier.out_features]  # 1000
                 )
                 # blocks
@@ -287,16 +287,16 @@ class RunManager:
                     else:
                         idskip = 1
                     out_fz = fsize // mb_conv.stride
-                    block_latency = self.latency_estimator.predict(
+                    block_energy = self.latency_estimator.predict(
                         'expanded_conv', [fsize, fsize, mb_conv.in_channels], [out_fz, out_fz, mb_conv.out_channels],
                         expand=mb_conv.expand_ratio, kernel=mb_conv.kernel_size, stride=mb_conv.stride, idskip=idskip
                     )
-                    predicted_latency += block_latency
+                    predicted_energy += block_energy
                     fsize = out_fz
             except Exception:
-                predicted_latency = 200
+                predicted_energy = 200
                 print('fail to predict the mobile latency')
-            return predicted_latency, None
+            return predicted_energy, None
         elif l_type == 'cpu':
             if fast:
                 n_warmup = 1
@@ -318,6 +318,57 @@ class RunManager:
                 n_warmup = 50
                 n_sample = 100
             images = torch.zeros(data_shape, device=self.device)
+        elif l_type == 'balanced':
+            predicted_energy = 0
+            predicted_cycle = 0
+            try:
+                assert isinstance(net, ProxylessNASNets)
+                # first conv
+
+                energy, cycle = self.latency_estimator.predict(
+                    'Conv', [32, 32, 3], [32, 32, net.first_conv.out_channels]
+                )
+                predicted_energy += energy
+                predicted_cycle += cycle
+                # feature mix layer
+                energy, cycle = self.latency_estimator.predict(
+                    'Conv_1', [8, 8, net.feature_mix_layer.in_channels], [8, 8, net.feature_mix_layer.out_channels]
+                )
+                predicted_energy += energy
+                predicted_cycle += cycle
+                # classifier
+                energy, cycle = self.latency_estimator.predict(
+                    'Logits', [8, 8, net.classifier.in_features], [net.classifier.out_features]  # 1000
+                )
+                predicted_energy += energy
+                predicted_cycle += cycle
+                # blocks
+                fsize = 32
+                for block in net.blocks:
+                    mb_conv = block.mobile_inverted_conv
+                    shortcut = block.shortcut
+                    if isinstance(mb_conv, MixedEdge):
+                        mb_conv = mb_conv.active_op
+                    if isinstance(shortcut, MixedEdge):
+                        shortcut = shortcut.active_op
+
+                    if mb_conv.is_zero_layer():
+                        continue
+                    if shortcut is None or shortcut.is_zero_layer():
+                        idskip = 0
+                    else:
+                        idskip = 1
+                    out_fz = fsize // mb_conv.stride
+                    block_energy, block_cycle = self.latency_estimator.predict(
+                        'expanded_conv', [fsize, fsize, mb_conv.in_channels], [out_fz, out_fz, mb_conv.out_channels],
+                        expand=mb_conv.expand_ratio, kernel=mb_conv.kernel_size, stride=mb_conv.stride, idskip=idskip
+                    )
+                    predicted_energy += block_energy
+                    predicted_cycle += block_cycle
+                    fsize = out_fz
+            except Exception:
+                print('fail to predict the mobile latency')
+            return predicted_energy, predicted_cycle
         else:
             raise NotImplementedError
 

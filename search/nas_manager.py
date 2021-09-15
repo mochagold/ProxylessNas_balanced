@@ -10,7 +10,7 @@ import pdb
 class ArchSearchConfig:
 
     def __init__(self, arch_init_type, arch_init_ratio, arch_opt_type, arch_lr,
-                 arch_opt_param, arch_weight_decay, target_hardware, ref_value):
+                 arch_opt_param, arch_weight_decay, target_hardware, ref_value_energy, ref_value_cycle):
         """ architecture parameters initialization & optimizer """
         self.arch_init_type = arch_init_type
         self.arch_init_ratio = arch_init_ratio
@@ -20,7 +20,8 @@ class ArchSearchConfig:
         self.opt_param = {} if arch_opt_param is None else arch_opt_param
         self.weight_decay = arch_weight_decay
         self.target_hardware = target_hardware
-        self.ref_value = ref_value
+        self.ref_value_energy = ref_value_energy
+        self.ref_value_cycle = ref_value_cycle
 
     @property
     def config(self):
@@ -52,12 +53,12 @@ class ArchSearchConfig:
 class GradientArchSearchConfig(ArchSearchConfig):
 
     def __init__(self, arch_init_type='normal', arch_init_ratio=1e-3, arch_opt_type='adam', arch_lr=1e-3,
-                 arch_opt_param=None, arch_weight_decay=0, target_hardware=None, ref_value=None,
+                 arch_opt_param=None, arch_weight_decay=0, target_hardware=None, ref_value_energy=None, ref_value_cycle=None,
                  grad_update_arch_param_every=1, grad_update_steps=1, grad_binary_mode='full', grad_data_batch=None,
                  grad_reg_loss_type=None, grad_reg_loss_params=None, **kwargs):
         super(GradientArchSearchConfig, self).__init__(
             arch_init_type, arch_init_ratio, arch_opt_type, arch_lr, arch_opt_param, arch_weight_decay,
-            target_hardware, ref_value,
+            target_hardware, ref_value_energy, ref_value_cycle
         )
 
         self.update_arch_param_every = grad_update_arch_param_every
@@ -77,8 +78,8 @@ class GradientArchSearchConfig(ArchSearchConfig):
                 schedule[i] = self.update_steps
         return schedule
 
-    def add_regularization_loss(self, ce_loss, expected_value):
-        if expected_value is None:
+    def add_regularization_loss(self, ce_loss, expected_energy, expected_cycle):
+        if expected_energy is None:
             return ce_loss
 
         if self.reg_loss_type == 'mul#log':
@@ -88,9 +89,16 @@ class GradientArchSearchConfig(ArchSearchConfig):
             reg_loss = (torch.log(expected_value) / math.log(self.ref_value)) ** beta
             return alpha * ce_loss * reg_loss
         elif self.reg_loss_type == 'add#linear':
+            # ##FIXME!
+            # reg_lambda = self.reg_loss_params.get('lambda', 2e-1)
+            # reg_loss = reg_lambda * (expected_value - self.ref_value) / self.ref_value
             reg_lambda = self.reg_loss_params.get('lambda', 2e-1)
-            reg_loss = reg_lambda * (expected_value - self.ref_value) / self.ref_value
-            return ce_loss + reg_loss
+            reg_loss_energy = reg_lambda * (expected_energy - self.ref_value_energy) / self.ref_value_energy
+
+            reg_delta = self.reg_loss_params.get('delta', 2e-1)
+            reg_loss_cycle = reg_delta * (expected_cycle - self.ref_value_cycle) / self.ref_value_cycle
+
+            return ce_loss + reg_loss_cycle + reg_loss_energy
         elif self.reg_loss_type is None:
             return ce_loss
         else:
@@ -133,6 +141,8 @@ class RLArchSearchConfig(ArchSearchConfig):
         acc = net_info['acc'] / 100
         if self.target_hardware is None:
             return acc
+        elif self.target_hardware == 'balanced': ##FIXME!
+            return acc * ((self.ref_value / net_info[self.target_hardware]) ** self.tradeoff_ratio)
         else:
             return acc * ((self.ref_value / net_info[self.target_hardware]) ** self.tradeoff_ratio)
 
@@ -404,11 +414,11 @@ class ArchSearchRunManager:
                             )
                             self.write_log(log_str, prefix='rl', should_print=False)
                         elif isinstance(self.arch_search_config, GradientArchSearchConfig):
-                            arch_loss, exp_value = self.gradient_step()
+                            arch_loss, exp_value_energy, exp_value_cycle = self.gradient_step()
                             used_time = time.time() - start_time
                             log_str = 'Architecture [%d-%d]\t Time %.4f\t Loss %.4f\t %s %s' % \
                                       (epoch + 1, i, used_time, arch_loss,
-                                       self.arch_search_config.target_hardware, exp_value)
+                                       self.arch_search_config.target_hardware, exp_value_energy)
                             self.write_log(log_str, prefix='gradient', should_print=False)
                         else:
                             raise ValueError('do not support: %s' % type(self.arch_search_config))
@@ -496,6 +506,10 @@ class ArchSearchRunManager:
                 pass
             elif self.arch_search_config.target_hardware == 'flops':
                 net_info['flops'] = self.run_manager.net_flops()
+            elif self.arch_search_config.target_hardware == 'balanced':
+                net_info['energy'], net_info['cycle'] = self.run_manager.net_latency(
+                    l_type=self.arch_search_config.target_hardware, fast=fast
+                )
             else:
                 net_info[self.arch_search_config.target_hardware], _ = self.run_manager.net_latency(
                     l_type=self.arch_search_config.target_hardware, fast=fast
@@ -570,9 +584,12 @@ class ArchSearchRunManager:
             data_shape = [1] + list(self.run_manager.run_config.data_provider.data_shape)
             input_var = torch.zeros(data_shape, device=self.run_manager.device)
             expected_value = self.net.expected_flops(input_var)
+        elif self.arch_search_config.target_hardware == 'balanced':
+            ##FIXME!
+            expected_energy, expected_cycle = self.net.expected_latency(self.run_manager.latency_estimator)
         else:
             raise NotImplementedError
-        loss = self.arch_search_config.add_regularization_loss(ce_loss, expected_value)
+        loss = self.arch_search_config.add_regularization_loss(ce_loss, expected_energy, expected_cycle)
         # compute gradient and do SGD step
         self.run_manager.net.zero_grad()  # zero grads of weight_param, arch_param & binary_param
         loss.backward()
@@ -589,4 +606,4 @@ class ArchSearchRunManager:
             '(%.4f, %.4f, %.4f)' % (time2 - time1, time3 - time2, time4 - time3), 'gradient',
             should_print=False, end='\t'
         )
-        return loss.data.item(), expected_value.item() if expected_value is not None else None
+        return loss.data.item(), expected_energy.item(), expected_cycle.item()

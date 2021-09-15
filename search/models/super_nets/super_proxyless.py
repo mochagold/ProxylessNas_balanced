@@ -193,18 +193,26 @@ class SuperProxylessNASNets(ProxylessNASNets):
             self_m.active_index = copy.deepcopy(net_m.active_index)
             self_m.inactive_index = copy.deepcopy(net_m.inactive_index)
 
+    ##FIXME!
     def expected_latency(self, latency_model: LatencyEstimator):
-        expected_latency = 0
+        expected_energy = 0
+        expected_cycle = 0
         # first conv
-        expected_latency += latency_model.predict('Conv', [32, 32, 3], [32, 32, self.first_conv.out_channels])
+        energy, cycle = latency_model.predict('Conv', [32, 32, 3], [32, 32, self.first_conv.out_channels])
+        expected_energy += energy
+        expected_cycle += cycle
         # feature mix layer
-        expected_latency += latency_model.predict(
+        energy, cycle = latency_model.predict(
             'Conv_1', [8, 8, self.feature_mix_layer.in_channels], [8, 8, self.feature_mix_layer.out_channels]
         )
+        expected_energy += energy
+        expected_cycle += cycle
         # classifier
-        expected_latency += latency_model.predict(
+        energy, cycle = latency_model.predict(
             'Logits', [8, 8, self.classifier.in_features], [self.classifier.out_features]  # 1000
         )
+        expected_energy += energy
+        expected_cycle += cycle
         # blocks
         fsize = 32
         for block in self.blocks:
@@ -218,11 +226,12 @@ class SuperProxylessNASNets(ProxylessNASNets):
             if not isinstance(mb_conv, MixedEdge):
                 if not mb_conv.is_zero_layer():
                     out_fz = fsize // mb_conv.stride
-                    op_latency = latency_model.predict(
+                    op_energy, op_cycle = latency_model.predict(
                         'expanded_conv', [fsize, fsize, mb_conv.in_channels], [out_fz, out_fz, mb_conv.out_channels],
                         expand=mb_conv.expand_ratio, kernel=mb_conv.kernel_size, stride=mb_conv.stride, idskip=idskip
                     )
-                    expected_latency = expected_latency + op_latency
+                    expected_energy = expected_energy + op_energy
+                    expected_cycle = expected_cycle + op_cycle
                     fsize = out_fz
                 continue
 
@@ -232,13 +241,15 @@ class SuperProxylessNASNets(ProxylessNASNets):
                 if op is None or op.is_zero_layer():
                     continue
                 out_fsize = fsize // op.stride
-                op_latency = latency_model.predict(
+                op_energy, op_cycle = latency_model.predict(
                     'expanded_conv', [fsize, fsize, op.in_channels], [out_fsize, out_fsize, op.out_channels],
                     expand=op.expand_ratio, kernel=op.kernel_size, stride=op.stride, idskip=idskip
                 )
-                expected_latency = expected_latency + op_latency * probs_over_ops[i]
+                expected_energy = expected_energy + op_energy * probs_over_ops[i]
+                expected_cycle = expected_cycle + op_cycle * probs_over_ops[i]
+
             fsize = out_fsize
-        return expected_latency
+        return expected_energy, expected_cycle
 
     def expected_flops(self, x):
         expected_flops = 0

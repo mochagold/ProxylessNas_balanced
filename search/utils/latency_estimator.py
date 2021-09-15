@@ -69,7 +69,7 @@ class LatencyEstimator(object):
             assert None not in (expand, kernel, stride, idskip)
             infos += ['expand:%d' % expand, 'kernel:%d' % kernel, 'stride:%d' % stride, 'idskip:%d' % idskip]
         key = '-'.join(infos)
-        return self.lut[key]['cycle']
+        return self.lut[key]['energy'], self.lut[key]['cycle']
 
 
 
